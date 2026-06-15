@@ -1,17 +1,19 @@
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
 import io
-import tempfile
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Image as RLImage, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_LEFT
 
 st.set_page_config(
     page_title="Logística | Dashboard",
@@ -670,11 +672,81 @@ def gerar_pdf(data, figs_bytes):
     return buf.read()
 
 
-def _fig_png(fig, h=300):
-    fig.update_layout(paper_bgcolor="#1e293b", plot_bgcolor="#1e293b",
-                      font=dict(color=FONT_COLOR), height=h,
-                      margin=dict(l=10, r=10, t=20, b=40))
-    return fig.to_image(format="png", width=800, height=h, scale=2)
+BG_MPL   = "#1e293b"
+FG_MPL   = "#94a3b8"
+RED_MPL  = "#ef4444"
+GRN_MPL  = "#22c55e"
+AMB_MPL  = "#f59e0b"
+
+def _mpl_buf(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+def _chart_trans_mpl(d):
+    grp = d.groupby(["transportadora","status"]).size().unstack(fill_value=0)
+    for col in ["No Prazo","Atrasado"]:
+        if col not in grp.columns:
+            grp[col] = 0
+    fig, ax = plt.subplots(figsize=(8,3), facecolor=BG_MPL)
+    ax.set_facecolor(BG_MPL)
+    x = range(len(grp))
+    ax.bar(x, grp["No Prazo"], color=GRN_MPL, label="No Prazo")
+    ax.bar(x, grp["Atrasado"], bottom=grp["No Prazo"], color=RED_MPL, label="Atrasado")
+    ax.set_xticks(list(x)); ax.set_xticklabels(grp.index, color=FG_MPL)
+    ax.tick_params(colors=FG_MPL); ax.yaxis.label.set_color(FG_MPL)
+    for sp in ax.spines.values(): sp.set_edgecolor("#334155")
+    ax.legend(facecolor=BG_MPL, labelcolor=FG_MPL, fontsize=9)
+    ax.set_ylabel("Entregas", color=FG_MPL)
+    return _mpl_buf(fig)
+
+def _chart_reg_mpl(d):
+    grp = d.groupby(["regiao","status"]).size().unstack(fill_value=0)
+    for col in ["No Prazo","Atrasado"]:
+        if col not in grp.columns:
+            grp[col] = 0
+    fig, ax = plt.subplots(figsize=(8,3), facecolor=BG_MPL)
+    ax.set_facecolor(BG_MPL)
+    x = range(len(grp))
+    ax.bar(x, grp["No Prazo"], color=GRN_MPL, label="No Prazo")
+    ax.bar(x, grp["Atrasado"], bottom=grp["No Prazo"], color=RED_MPL, label="Atrasado")
+    ax.set_xticks(list(x)); ax.set_xticklabels(grp.index, color=FG_MPL, rotation=15, ha="right")
+    ax.tick_params(colors=FG_MPL)
+    for sp in ax.spines.values(): sp.set_edgecolor("#334155")
+    ax.legend(facecolor=BG_MPL, labelcolor=FG_MPL, fontsize=9)
+    ax.set_ylabel("Entregas", color=FG_MPL)
+    return _mpl_buf(fig)
+
+def _chart_pie_mpl(d):
+    counts = d["status"].value_counts()
+    clrs = [GRN_MPL if s == "No Prazo" else RED_MPL for s in counts.index]
+    fig, ax = plt.subplots(figsize=(4,3), facecolor=BG_MPL)
+    wedges, texts, autotexts = ax.pie(
+        counts, labels=counts.index, colors=clrs,
+        autopct="%1.1f%%", wedgeprops=dict(width=0.5),
+        textprops=dict(color=FG_MPL),
+    )
+    for at in autotexts: at.set_color("white")
+    return _mpl_buf(fig)
+
+def _chart_rank_mpl(d, group_col):
+    rk = d.groupby(group_col).agg(Total=("id_entrega","count"), Atrasadas=("atrasado","sum")).reset_index()
+    rk["Taxa"] = (rk["Atrasadas"] / rk["Total"] * 100).round(1)
+    rk = rk.sort_values("Taxa", ascending=True)
+    clrs = [RED_MPL if t>=60 else AMB_MPL if t>=30 else GRN_MPL for t in rk["Taxa"]]
+    fig, ax = plt.subplots(figsize=(8,3), facecolor=BG_MPL)
+    ax.set_facecolor(BG_MPL)
+    bars = ax.barh(rk[group_col], rk["Taxa"], color=clrs)
+    for bar, val in zip(bars, rk["Taxa"]):
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2,
+                f"{val:.1f}%", va="center", color=FG_MPL, fontsize=9)
+    ax.set_xlim(0, 115)
+    ax.tick_params(colors=FG_MPL)
+    for sp in ax.spines.values(): sp.set_edgecolor("#334155")
+    ax.set_xlabel("Taxa de Atraso (%)", color=FG_MPL)
+    return _mpl_buf(fig)
 
 
 if df_f is not None and len(df_f) > 0:
@@ -682,48 +754,12 @@ if df_f is not None and len(df_f) > 0:
     with col_exp:
         if st.button("📄 Gerar relatório PDF", use_container_width=True, type="primary"):
             with st.spinner("Gerando PDF..."):
-                # transportadora
-                ts = df_f.groupby(["transportadora","status"]).size().reset_index(name="n")
-                fig_t = px.bar(ts, x="transportadora", y="n", color="status", barmode="stack",
-                               color_discrete_map=COLORS, text_auto=True,
-                               labels={"n":"Entregas","transportadora":"","status":"Status"})
-                # região
-                rs = df_f.groupby(["regiao","status"]).size().reset_index(name="n")
-                fig_r = px.bar(rs, x="regiao", y="n", color="status", barmode="stack",
-                               color_discrete_map=COLORS, text_auto=True,
-                               labels={"n":"Entregas","regiao":"","status":"Status"})
-                # pizza
-                sc = df_f["status"].value_counts().reset_index()
-                sc.columns = ["Status","n"]
-                fig_p = px.pie(sc, names="Status", values="n", color="Status",
-                               color_discrete_map=COLORS, hole=0.5)
-                fig_p.update_layout(paper_bgcolor="#1e293b", font=dict(color=FONT_COLOR),
-                                    height=300, margin=dict(l=10,r=10,t=20,b=40))
-                # ranking transportadora
-                rk = df_f.groupby("transportadora").agg(
-                    Total=("id_entrega","count"), Atrasadas=("atrasado","sum")).reset_index()
-                rk["Taxa"] = (rk["Atrasadas"] / rk["Total"] * 100).round(1)
-                rk = rk.sort_values("Taxa", ascending=True)
-                fig_rt = go.Figure(go.Bar(y=rk["transportadora"], x=rk["Taxa"], orientation="h",
-                    marker_color=["#ef4444" if t>=60 else "#f59e0b" if t>=30 else "#22c55e" for t in rk["Taxa"]],
-                    text=[f"{v:.1f}%" for v in rk["Taxa"]], textposition="outside"))
-                fig_rt.update_layout(xaxis=dict(range=[0,115]))
-                # ranking região
-                rk2 = df_f.groupby("regiao").agg(
-                    Total=("id_entrega","count"), Atrasadas=("atrasado","sum")).reset_index()
-                rk2["Taxa"] = (rk2["Atrasadas"] / rk2["Total"] * 100).round(1)
-                rk2 = rk2.sort_values("Taxa", ascending=True)
-                fig_rr = go.Figure(go.Bar(y=rk2["regiao"], x=rk2["Taxa"], orientation="h",
-                    marker_color=["#ef4444" if t>=60 else "#f59e0b" if t>=30 else "#22c55e" for t in rk2["Taxa"]],
-                    text=[f"{v:.1f}%" for v in rk2["Taxa"]], textposition="outside"))
-                fig_rr.update_layout(xaxis=dict(range=[0,115]))
-
                 figs_bytes = [
-                    _fig_png(fig_t),
-                    _fig_png(fig_r),
-                    fig_p.to_image(format="png", width=800, height=300, scale=2),
-                    _fig_png(fig_rt),
-                    _fig_png(fig_rr),
+                    _chart_trans_mpl(df_f),
+                    _chart_reg_mpl(df_f),
+                    _chart_pie_mpl(df_f),
+                    _chart_rank_mpl(df_f, "transportadora"),
+                    _chart_rank_mpl(df_f, "regiao"),
                 ]
                 pdf_bytes = gerar_pdf(df_f, figs_bytes)
 
